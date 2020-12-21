@@ -17,30 +17,30 @@
             "tile_overlap": 0.25,
             "tiling_grid": [4, 2],
             "conf_thresh": 0.5,
-            "max_area": 70000,
-            "merge_thresh": 0.3
+            "max_area": 130000,
+            "merge_thresh": 0.6
         },
         "yolo_detector": {
-            "model": "YOLOV4",
+            "model": "YOLOv4",
             "class_ids": [1],
             "conf_thresh": 0.25,
-            "max_area": 900000,
+            "max_area": 800000,
             "nms_thresh": 0.5
         },
         "public_detector": {
             "sequence": "eval/data/MOT17-04",
             "conf_thresh": 0.5,
-            "max_area": 900000
+            "max_area": 800000
         },
         "feature_extractor": {
             "model": "OSNet025",
-            "batch_size": 32
+            "batch_size": 16
         },
 
         "multi_tracker": {
-            "max_age": 8,
+            "max_age": 7,
             "age_factor": 2,
-            "motion_weight": 0.04,
+            "motion_weight": 0.02,
             "max_feat_cost": 0.9,
             "max_reid_cost": 0.6,
             "iou_thresh": 0.4,
@@ -49,16 +49,16 @@
             "lost_buf_size": 50,
 
             "kalman_filter": {
-                "small_std_acc": [32, 150],
-                "large_std_acc": [256, 650],
-                "min_std_det": [4, 4],
-                "min_std_flow": [5, 5],
+                "std_factor_acc": 2.25,
+                "std_offset_acc": 78.5,
                 "std_factor_det": [0.08, 0.08],
                 "std_factor_flow": [0.14, 0.14],
-                "init_pos_std_factor": 24,
-                "init_vel_std_factor": 40,
+                "min_std_det": [4.0, 4.0],
+                "min_std_flow": [5.0, 5.0],
+                "init_pos_weight": 5,
+                "init_vel_weight": 10,
                 "vel_coupling": 0.6,
-                "vel_half_life": 1
+                "vel_half_life": 2
             },
 
             "flow": {
@@ -66,9 +66,9 @@
                 "opt_flow_scale_factor": [0.5, 0.5],
                 "feature_density": 0.005,
                 "feat_dist_factor": 0.06,
-                "max_error": 100,
                 "ransac_max_iter": 500,
                 "ransac_conf": 0.99,
+                "max_error": 100,
                 "inlier_thresh": 4,
                 "bg_feat_thresh": 15,
                 "target_feat_params": {

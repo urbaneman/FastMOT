@@ -34,12 +34,6 @@ def get_center(tlbr):
 
 
 @nb.njit(cache=True)
-def get_corners(tlbr):
-    xmin, ymin, xmax, ymax = tlbr
-    return np.array([[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]])
-
-
-@nb.njit(cache=True)
 def to_tlwh(tlbr):
     return np.append(tlbr[:2], get_size(tlbr))
 
@@ -51,13 +45,6 @@ def to_tlbr(tlwh):
     tl, size = tlwh[:2], tlwh[2:]
     br = tl + size - 1
     return np.append(tl, br)
-
-
-@nb.njit(cache=True)
-def contains(tlbr1, tlbr2):
-    tl1, br1 = tlbr1[:2], tlbr1[2:]
-    tl2, br2 = tlbr2[:2], tlbr2[2:]
-    return np.all((tl2 >= tl1) & (br2 <= br1))
 
 
 @nb.njit(cache=True)
@@ -90,22 +77,22 @@ def crop(img, tlbr):
 
 @nb.njit(cache=True)
 def multi_crop(img, tlbrs):
-    _tlbrs = tlbrs.astype(np.int_)
-    return [img[_tlbrs[i][1]:_tlbrs[i][3] + 1, _tlbrs[i][0]:_tlbrs[i][2] + 1] for i in range(len(_tlbrs))]
-    
+    tlbrs_ = tlbrs.astype(np.int_)
+    return [img[tlbrs_[i][1]:tlbrs_[i][3] + 1, tlbrs_[i][0]:tlbrs_[i][2] + 1]
+            for i in range(len(tlbrs_))]
+
 
 @nb.njit(fastmath=True, cache=True)
-def warp(tlbr, m):
+def iom(tlbr1, tlbr2):
     """
-    Warps bounding box with a 3x3 transformation matrix.
+    Computes intersection over minimum.
     """
-    corners = get_corners(tlbr)
-    warped_corners = perspective_transform(corners, m)
-    xmin = min(warped_corners[:, 0])
-    ymin = min(warped_corners[:, 1])
-    xmax = max(warped_corners[:, 0])
-    ymax = max(warped_corners[:, 1])
-    return as_rect((xmin, ymin, xmax, ymax))
+    tlbr = intersection(tlbr1, tlbr2)
+    if tlbr is None:
+        return 0.
+    area_intersection = area(tlbr)
+    area_minimum = min(area(tlbr1), area(tlbr2))
+    return area_intersection / area_minimum
 
 
 @nb.njit(fastmath=True, cache=True)
@@ -135,24 +122,24 @@ def perspective_transform(pts, m):
 
 
 @nb.njit(fastmath=True, cache=True)
-def nms(bboxes, scores, nms_thresh):
+def nms(tlwhs, scores, nms_thresh):
     """
     Applies the Non-Maximum Suppression algorithm on the bounding boxes [x, y, w, h]
     with their confidence scores and return an array with the indexes of the bounding
     boxes we want to keep
     """
-    areas = bboxes[:, 2] * bboxes[:, 3]
+    areas = tlwhs[:, 2] * tlwhs[:, 3]
     ordered = scores.argsort()[::-1]
 
-    tl = bboxes[:, :2]
-    br = bboxes[:, :2] + bboxes[:, 2:] - 1
+    tl = tlwhs[:, :2]
+    br = tlwhs[:, :2] + tlwhs[:, 2:] - 1
 
     keep = []
     while ordered.size > 0:
         # index of the current element
         i = ordered[0]
         keep.append(i)
-        
+
         # compute IOU
         candidate_tl = tl[ordered[1:]]
         candidate_br = br[ordered[1:]]
@@ -161,7 +148,7 @@ def nms(bboxes, scores, nms_thresh):
         overlap_ymin = np.maximum(tl[i, 1], candidate_tl[:, 1])
         overlap_xmax = np.minimum(br[i, 0], candidate_br[:, 0])
         overlap_ymax = np.minimum(br[i, 1], candidate_br[:, 1])
-        
+
         width = np.maximum(0, overlap_xmax - overlap_xmin + 1)
         height = np.maximum(0, overlap_ymax - overlap_ymin + 1)
         area_intersection = width * height

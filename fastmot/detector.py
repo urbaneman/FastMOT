@@ -1,22 +1,20 @@
+from collections import defaultdict
 from pathlib import Path
 import configparser
-
-from cython_bbox import bbox_overlaps
-from collections import defaultdict
-from numba.typed import Dict
 import numpy as np
 import numba as nb
 import cv2
 
 from . import models
 from .utils import InferenceBackend
-from .utils.rect import *
+from .utils.rect import as_rect, to_tlbr, get_size, area
+from .utils.rect import union, multi_crop, iom, nms
 
 
-DET_DTYPE = np.dtype([
-    ('tlbr', float, 4), 
-    ('label', int), 
-    ('conf', float)], 
+DET_DTYPE = np.dtype(
+    [('tlbr', float, 4),
+     ('label', int),
+     ('conf', float)],
     align=True
 )
 
@@ -48,7 +46,7 @@ class SSDDetector(Detector):
     def __init__(self, size, config):
         super().__init__(size)
         self.label_mask = np.zeros(len(models.LABEL_MAP), dtype=bool)
-        self.label_mask[config['class_ids']] = True
+        self.label_mask[list(config['class_ids'])] = True
 
         self.model = getattr(models, config['model'])
         self.tile_overlap = config['tile_overlap']
@@ -70,8 +68,9 @@ class SSDDetector(Detector):
 
     def postprocess(self):
         det_out = self.backend.synchronize()[0]
-        detections, tile_ids = self._filter_dets(det_out, self.tiles, self.model.TOPK, 
-            self.label_mask, self.max_area, self.conf_thresh, self.scale_factor)
+        detections, tile_ids = self._filter_dets(det_out, self.tiles, self.model.TOPK,
+                                                 self.label_mask, self.max_area,
+                                                 self.conf_thresh, self.scale_factor)
         detections = self._merge_dets(detections, tile_ids)
         return detections
 
@@ -81,8 +80,8 @@ class SSDDetector(Detector):
         step_size = (1 - self.tile_overlap) * tile_size
         total_size = (tiling_grid - 1) * step_size + tile_size
         total_size = tuple(total_size.astype(int))
-        tiles = np.array([to_tlbr((c * step_size[0], r * step_size[1], *tile_size)) 
-            for r in range(tiling_grid[1]) for c in range(tiling_grid[0])])
+        tiles = np.array([to_tlbr((c * step_size[0], r * step_size[1], *tile_size))
+                          for r in range(tiling_grid[1]) for c in range(tiling_grid[0])])
         return tiles, total_size
 
     def _merge_dets(self, detections, tile_ids):
@@ -90,13 +89,9 @@ class SSDDetector(Detector):
         tile_ids = np.asarray(tile_ids)
         if len(detections) == 0:
             return detections
-
-        # merge detections across different tiles
-        bboxes = detections.tlbr
-        ious = bbox_overlaps(bboxes, bboxes)
-        detections = self._merge(detections, tile_ids, ious, self.merge_thresh)
+        detections = self._merge(detections, tile_ids, self.batch_size, self.merge_thresh)
         return detections.view(np.recarray)
-    
+
     @staticmethod
     @nb.njit(parallel=True, fastmath=True, cache=True)
     def _preprocess(frame, tiles, out, size):
@@ -131,27 +126,27 @@ class SSDDetector(Detector):
                     tl = (det_out[offset + 3:offset + 5] * size + tile[:2]) * scale_factor
                     br = (det_out[offset + 5:offset + 7] * size + tile[:2]) * scale_factor
                     tlbr = as_rect(np.append(tl, br))
-                    if area(tlbr) <= max_area:
+                    if 0 < area(tlbr) <= max_area:
                         detections.append((tlbr, label, conf))
                         tile_ids.append(tile_idx)
         return detections, tile_ids
 
     @staticmethod
     @nb.njit(fastmath=True, cache=True)
-    def _merge(dets, tile_ids, ious, thresh):
-        # find adjacent detections
-        neighbors = [Dict.empty(nb.types.int64, nb.types.int64) for _ in range(len(dets))]
-        for i in range(len(dets)):
-            cur_neighbors = neighbors[i]
-            for j in range(len(dets)):
-                if tile_ids[j] != tile_ids[i] and dets[i].label == dets[j].label:
-                    if contains(dets[i].tlbr, dets[j].tlbr) or contains(dets[j].tlbr, dets[i].tlbr) or \
-                        ious[i, j] >= thresh:
-                        # pick the nearest detection from each tile
-                        if cur_neighbors.get(tile_ids[j]) is None or ious[i, j] > ious[i, cur_neighbors[tile_ids[j]]]:
-                            cur_neighbors[tile_ids[j]] = j
-        
-        # merge detections using depth-first search
+    def _merge(dets, tile_ids, num_tile, thresh):
+        # find duplicate neighbors across tiles
+        neighbors = [[0 for _ in range(0)] for _ in range(len(dets))]
+        for i, det in enumerate(dets):
+            max_ioms = np.zeros(num_tile)
+            for j, other in enumerate(dets):
+                if tile_ids[i] != tile_ids[j] and det.label == other.label:
+                    overlap = iom(det.tlbr, other.tlbr)
+                    # use the detection with the greatest IoM from each tile
+                    if overlap >= thresh and overlap > max_ioms[tile_ids[j]]:
+                        max_ioms[tile_ids[j]] = overlap
+                        neighbors[i].append(j)
+
+        # merge neighbors using depth-first search
         keep = set(range(len(dets)))
         stack = []
         for i in range(len(dets)):
@@ -160,7 +155,7 @@ class SSDDetector(Detector):
                 stack.append(i)
                 candidates = []
                 while len(stack) > 0:
-                    for j in neighbors[stack.pop()].values():
+                    for j in neighbors[stack.pop()]:
                         if tile_ids[j] != -1:
                             candidates.append(j)
                             tile_ids[j] = -1
@@ -181,7 +176,7 @@ class YoloDetector(Detector):
         self.conf_thresh = config['conf_thresh']
         self.max_area = config['max_area']
         self.nms_thresh = config['nms_thresh']
-        
+
         self.batch_size = 1
         self.backend = InferenceBackend(self.model, self.batch_size)
 
@@ -193,11 +188,11 @@ class YoloDetector(Detector):
     def postprocess(self):
         det_out = self.backend.synchronize()
         det_out = np.concatenate(det_out).reshape(-1, 7)
-        detections = self._filter_dets(det_out, self.size, self.class_ids, self.conf_thresh, 
-            self.nms_thresh, self.max_area)
+        detections = self._filter_dets(det_out, self.size, self.class_ids, self.conf_thresh,
+                                       self.nms_thresh, self.max_area)
         detections = np.asarray(detections, dtype=DET_DTYPE).view(np.recarray)
         return detections
-    
+
     @staticmethod
     @nb.njit(fastmath=True, cache=True)
     def _preprocess(frame, out):
@@ -214,14 +209,14 @@ class YoloDetector(Detector):
     def _filter_dets(det_out, size, class_ids, conf_thresh, nms_thresh, max_area):
         """
         det_out: a list of 3 tensors, where each tensor
-                    contains a multiple of 7 float32 numbers in
-                    the order of [x, y, w, h, box_confidence, class_id, class_prob]
+                 contains a multiple of 7 float32 numbers in
+                 the order of [x, y, w, h, box_confidence, class_id, class_prob]
         """
         size = np.asarray(size)
 
         # drop detections with low score
         scores = det_out[:, 4] * det_out[:, 6]
-        keep = np.where(scores >= conf_thresh)[0]
+        keep = np.where(scores >= conf_thresh)
         det_out = det_out[keep]
 
         # scale to pixel values
@@ -236,7 +231,7 @@ class YoloDetector(Detector):
             keep.extend(class_idx[class_keep])
         keep = np.asarray(keep)
         nms_dets = det_out[keep]
-        
+
         detections = []
         for i in range(len(nms_dets)):
             tlbr = to_tlbr(nms_dets[i, :4])
@@ -245,7 +240,7 @@ class YoloDetector(Detector):
             tlbr = np.minimum(tlbr, np.append(size, size))
             label = int(nms_dets[i, 5])
             conf = nms_dets[i, 4] * nms_dets[i, 6]
-            if area(tlbr) <= max_area:
+            if 0 < area(tlbr) <= max_area:
                 detections.append((tlbr, label, conf))
         return detections
 

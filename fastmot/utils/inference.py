@@ -25,15 +25,15 @@ class InferenceBackend:
         self.model = model
         self.batch_size = batch_size
         self.runtime = trt.Runtime(InferenceBackend.TRT_LOGGER)
-        
+
         # load plugin if the model requires one
         if self.model.PLUGIN_PATH is not None:
             try:
                 ctypes.cdll.LoadLibrary(self.model.PLUGIN_PATH)
             except OSError as err:
-                raise RuntimeError('Plugin not built') from err
+                raise RuntimeError('Plugin not found') from err
 
-        # load cuda engine or build one if it doesn't exist
+        # load trt engine or build one if not found
         if not self.model.ENGINE_PATH.exists():
             self.engine = self.model.build_engine(InferenceBackend.TRT_LOGGER, self.batch_size)
         else:
@@ -41,6 +41,8 @@ class InferenceBackend:
                 buf = engine_file.read()
                 self.engine = self.runtime.deserialize_cuda_engine(buf)
 
+        if self.engine is None:
+            raise RuntimeError('Unable to load the engine file')
         if self.engine.has_implicit_batch_dimension:
             assert self.batch_size <= self.engine.max_batch_size
 
@@ -53,19 +55,18 @@ class InferenceBackend:
             if self.engine.has_implicit_batch_dimension:
                 size *= self.batch_size
             dtype = trt.nptype(self.engine.get_binding_dtype(binding))
-            # Allocate host and device buffers
+            # allocate host and device buffers
             host_mem = cuda.pagelocked_empty(size, dtype)
             device_mem = cuda.mem_alloc(host_mem.nbytes)
-            # Append the device buffer to device bindings
+            # append the device buffer to device bindings
             self.bindings.append(int(device_mem))
-            # Append to the appropriate list
             if self.engine.binding_is_input(binding):
                 if not self.engine.has_implicit_batch_dimension:
                     assert self.batch_size == shape[0]
                 self.input = HostDeviceMem(host_mem, device_mem)
             else:
                 self.outputs.append(HostDeviceMem(host_mem, device_mem))
-        
+
         self.stream = cuda.Stream()
         self.context = self.engine.create_execution_context()
 
@@ -76,7 +77,8 @@ class InferenceBackend:
     def infer_async(self):
         cuda.memcpy_htod_async(self.input.device, self.input.host, self.stream)
         if self.engine.has_implicit_batch_dimension:
-            self.context.execute_async(batch_size=self.batch_size, bindings=self.bindings, stream_handle=self.stream.handle)
+            self.context.execute_async(batch_size=self.batch_size, bindings=self.bindings,
+                                       stream_handle=self.stream.handle)
         else:
             self.context.execute_async_v2(bindings=self.bindings, stream_handle=self.stream.handle)
         for out in self.outputs:

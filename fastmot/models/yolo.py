@@ -4,6 +4,10 @@ import numpy as np
 import tensorrt as trt
 
 
+EXPLICIT_BATCH = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+LOGGER = logging.getLogger(__name__)
+
+
 class YOLO:
     PLUGIN_PATH = Path(__file__).parents[1] / 'plugins' / 'libyolo_layer.so'
     ENGINE_PATH = None
@@ -11,6 +15,7 @@ class YOLO:
     NUM_CLASSES = None
     INPUT_SHAPE = ()
     LAYER_FACTORS = []
+    SCALES = []
     ANCHORS = []
 
     @classmethod
@@ -44,7 +49,8 @@ class YOLO:
                     trt.PluginField("inputHeight", np.array(cls.INPUT_SHAPE[1], dtype=np.int32), trt.PluginFieldType.INT32),
                     trt.PluginField("numClasses", np.array(cls.NUM_CLASSES, dtype=np.int32), trt.PluginFieldType.INT32),
                     trt.PluginField("numAnchors", np.array(num_anchors, dtype=np.int32), trt.PluginFieldType.INT32),
-                    trt.PluginField("anchors", np.ascontiguousarray(cls.ANCHORS[i], dtype=np.float32), trt.PluginFieldType.FLOAT32),
+                    trt.PluginField("anchors", np.array(cls.ANCHORS[i], dtype=np.float32), trt.PluginFieldType.FLOAT32),
+                    trt.PluginField("scaleXY", np.array(cls.SCALES[i], dtype=np.float32), trt.PluginFieldType.FLOAT32),
                 ]))
             )
             new_tensors.append(plugin.get_output(0))
@@ -57,21 +63,24 @@ class YOLO:
 
     @classmethod
     def build_engine(cls, trt_logger, batch_size):
-        EXPLICIT_BATCH = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         with trt.Builder(trt_logger) as builder, builder.create_network(EXPLICIT_BATCH) as network, \
             trt.OnnxParser(network, trt_logger) as parser:
 
             builder.max_workspace_size = 1 << 30
             builder.max_batch_size = batch_size
-            logging.info('Building engine with batch size: %d', batch_size)
-            logging.info('This may take a while...')
+            LOGGER.info('Building engine with batch size: %d', batch_size)
+            LOGGER.info('This may take a while...')
 
             if builder.platform_has_fast_fp16:
                 builder.fp16_mode = True
 
             # parse model file
             with open(cls.MODEL_PATH, 'rb') as model_file:
-                parser.parse(model_file.read())
+                if not parser.parse(model_file.read()):
+                    LOGGER.critical('Failed to parse the ONNX file')
+                    for err in range(parser.num_errors):
+                        LOGGER.error(parser.get_error(err))
+                    return None
 
             # yolo*.onnx is generated with batch size 64
             # reshape input to the right batch size
@@ -80,17 +89,22 @@ class YOLO:
             network = cls.add_plugin(network)
             engine = builder.build_cuda_engine(network)
             if engine is None:
+                LOGGER.critical('Failed to build engine')
                 return None
-            logging.info("Completed creating Engine")
+
+            LOGGER.info("Completed creating engine")
             with open(cls.ENGINE_PATH, 'wb') as engine_file:
                 engine_file.write(engine.serialize())
             return engine
 
 
-class YOLOV4(YOLO):
+class YOLOv4(YOLO):
     ENGINE_PATH = Path(__file__).parent / 'yolov4_crowdhuman.trt'
     MODEL_PATH = Path(__file__).parent /  'yolov4_crowdhuman.onnx'
     NUM_CLASSES = 2
     INPUT_SHAPE = (3, 512, 512)
     LAYER_FACTORS = [8, 16, 32]
-    ANCHORS = [[11, 22, 24, 60, 37, 116], [54, 186, 69, 268, 89, 369], [126, 491, 194, 314, 278, 520]]
+    SCALES = [1.2, 1.1, 1.05]
+    ANCHORS = [[11, 22, 24, 60, 37, 116],
+               [54, 186, 69, 268, 89, 369],
+               [126, 491, 194, 314, 278, 520]]

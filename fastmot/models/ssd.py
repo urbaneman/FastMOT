@@ -3,6 +3,9 @@ import logging
 import tensorrt as trt
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class SSD:
     PLUGIN_PATH = None
     ENGINE_PATH = None
@@ -19,8 +22,8 @@ class SSD:
         import graphsurgeon as gs
         import uff
         from . import calibrator
-        
-        # compile model into TensorRT
+
+        # convert TensorFlow graph into UFF
         dynamic_graph = gs.DynamicGraph(str(cls.MODEL_PATH))
         dynamic_graph = cls.add_plugin(dynamic_graph)
         uff_model = uff.from_tensorflow(dynamic_graph.as_graph_def(), [cls.OUTPUT_NAME], quiet=True)
@@ -28,23 +31,27 @@ class SSD:
         with trt.Builder(trt_logger) as builder, builder.create_network() as network, trt.UffParser() as parser:
             builder.max_workspace_size = 1 << 30
             builder.max_batch_size = batch_size
-            logging.info('Building engine with batch size: %d', batch_size)
-            logging.info('This may take a while...')
-            
+            LOGGER.info('Building engine with batch size: %d', batch_size)
+            LOGGER.info('This may take a while...')
+
             if builder.platform_has_fast_fp16:
                 builder.fp16_mode = True
             if builder.platform_has_fast_int8:
                 builder.int8_mode = True
-                builder.int8_calibrator = calibrator.SSDEntropyCalibrator(cls.INPUT_SHAPE, data_dir=calib_dataset, 
-                    cache_file=Path(__file__).parent / f'{cls.__name__}_calib_cache')
+                builder.int8_calibrator = calibrator.SSDEntropyCalibrator(cls.INPUT_SHAPE,
+                                                                          data_dir=calib_dataset,
+                                                                          cache_file=Path(__file__).parent /
+                                                                          f'{cls.__name__}_calib_cache')
 
             parser.register_input('Input', cls.INPUT_SHAPE)
             parser.register_output('MarkOutput_0')
             parser.parse_buffer(uff_model, network)
             engine = builder.build_cuda_engine(network)
             if engine is None:
+                LOGGER.critical('Failed to build engine')
                 return None
-            logging.info("Completed creating Engine")
+
+            LOGGER.info("Completed creating engine")
             with open(cls.ENGINE_PATH, 'wb') as engine_file:
                 engine_file.write(engine.serialize())
             return engine

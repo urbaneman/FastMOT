@@ -129,10 +129,9 @@ dmypy.json
 
 # Mac temporary files
 .DS_Store
-._.DS_Store
 ._*
 
-# Model files
+# model files
 *.pb
 *.onnx
 
@@ -140,8 +139,25 @@ dmypy.json
 *.trt
 *calib_cache
 
-# video files
+# video and image files
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+*.heic
+*.JPG
+*.JPEG
+*.PNG
+*.BMP
+*.TIF
+*.TIFF
+*.HEIC
 *.mp4
+*.mov
+*.MOV
+*.avi
 
 # dataset
 VOCdevkit/

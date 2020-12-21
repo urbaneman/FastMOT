@@ -30,37 +30,28 @@ class KalmanFilter:
 
     def __init__(self, dt, config):
         self.dt = dt
-        self.small_std_acc = config['small_std_acc']
-        self.large_std_acc = config['large_std_acc']
-        self.min_std_det = config['min_std_det']
-        self.min_std_flow = config['min_std_flow']
+        self.std_factor_acc = config['std_factor_acc']
+        self.std_offset_acc = config['std_offset_acc']
         self.std_factor_det = config['std_factor_det']
         self.std_factor_flow = config['std_factor_flow']
-        self.init_pos_std_factor = config['init_pos_std_factor']
-        self.init_vel_std_factor = config['init_vel_std_factor']
+        self.min_std_det = config['min_std_det']
+        self.min_std_flow = config['min_std_flow']
+        self.init_pos_weight = config['init_pos_weight']
+        self.init_vel_weight = config['init_vel_weight']
         self.vel_coupling = config['vel_coupling']
         self.vel_half_life = config['vel_half_life']
 
-        # acceleration std adjustment rate with respect to pixel width/height
-        self.std_acc_rate = (self.large_std_acc[1] - self.small_std_acc[1]) / (self.large_std_acc[0] - 
-            self.small_std_acc[0])
-
         # acceleration-based process noise
-        self.acc_cov = np.diag(np.array([0.25 * self.dt**4] * 4 + [self.dt**2] * 4, dtype=np.float))
+        self.acc_cov = np.diag([0.25 * self.dt**4] * 4 + [self.dt**2] * 4)
         self.acc_cov[4:, :4] = np.eye(4) * (0.5 * self.dt**3)
         self.acc_cov[:4, 4:] = np.eye(4) * (0.5 * self.dt**3)
 
         self.meas_mat = np.eye(4, 8)
-        self.transition_mat = np.array([
-            [1, 0, 0, 0, self.vel_coupling * self.dt, 0, (1 - self.vel_coupling) * self.dt, 0],
-            [0, 1, 0, 0, 0, self.vel_coupling * self.dt, 0, (1 - self.vel_coupling) * self.dt], 
-            [0, 0, 1, 0, (1 - self.vel_coupling) * self.dt, 0, self.vel_coupling * self.dt, 0], 
-            [0, 0, 0, 1, 0, (1 - self.vel_coupling) * self.dt, 0, self.vel_coupling * self.dt], 
-            [0, 0, 0, 0, 0.5**(self.dt / self.vel_half_life), 0, 0, 0], 
-            [0, 0, 0, 0, 0, 0.5**(self.dt / self.vel_half_life), 0, 0], 
-            [0, 0, 0, 0, 0, 0, 0.5**(self.dt / self.vel_half_life), 0],
-            [0, 0, 0, 0, 0, 0, 0, 0.5**(self.dt / self.vel_half_life)],
-        ], dtype=np.float)
+        self.motion_mat = np.eye(8)
+        for i in range(4):
+            self.motion_mat[i, i + 4] = self.vel_coupling * self.dt
+            self.motion_mat[i, (i + 2) % 4 + 4] = (1. - self.vel_coupling) * self.dt
+            self.motion_mat[i + 4, i + 4] = 0.5**(self.dt / self.vel_half_life)
 
     def initiate(self, det_meas):
         """
@@ -79,17 +70,17 @@ class KalmanFilter:
         mean_vel = np.zeros_like(mean_pos)
         mean = np.r_[mean_pos, mean_vel]
 
-        width, height = get_size(det_meas)
+        w, h = get_size(det_meas)
         std = np.array([
-            self.init_pos_std_factor * max(width * self.std_factor_det[0], self.std_factor_det[0]),
-            self.init_pos_std_factor * max(height * self.std_factor_det[1], self.std_factor_det[1]),
-            self.init_pos_std_factor * max(width * self.std_factor_det[0], self.std_factor_det[0]),
-            self.init_pos_std_factor * max(height * self.std_factor_det[1], self.std_factor_det[1]),
-            self.init_vel_std_factor * max(width * self.std_factor_det[0], self.std_factor_det[0]),
-            self.init_vel_std_factor * max(height * self.std_factor_det[1], self.std_factor_det[1]),
-            self.init_vel_std_factor * max(width * self.std_factor_det[0], self.std_factor_det[0]),
-            self.init_vel_std_factor * max(height * self.std_factor_det[1], self.std_factor_det[1]),
-        ], dtype=np.float)
+            max(self.init_pos_weight * self.std_factor_det[0] * w, self.min_std_det[0]),
+            max(self.init_pos_weight * self.std_factor_det[1] * h, self.min_std_det[1]),
+            max(self.init_pos_weight * self.std_factor_det[0] * w, self.min_std_det[0]),
+            max(self.init_pos_weight * self.std_factor_det[1] * h, self.min_std_det[1]),
+            max(self.init_vel_weight * self.std_factor_det[0] * w, self.min_std_det[0]),
+            max(self.init_vel_weight * self.std_factor_det[1] * h, self.min_std_det[1]),
+            max(self.init_vel_weight * self.std_factor_det[0] * w, self.min_std_det[0]),
+            max(self.init_vel_weight * self.std_factor_det[1] * h, self.min_std_det[1])
+        ], dtype=np.float64)
         covariance = np.diag(np.square(std))
         return mean, covariance
 
@@ -110,8 +101,8 @@ class KalmanFilter:
             Returns the mean vector and covariance matrix of the predicted
             state.
         """
-        return self._predict(mean, covariance, self.small_std_acc, self.std_acc_rate, 
-            self.acc_cov, self.transition_mat)
+        return self._predict(mean, covariance, self.motion_mat, self.acc_cov,
+                             self.std_factor_acc, self.std_offset_acc)
 
     def project(self, mean, covariance, meas_type, multiplier=1.):
         """
@@ -141,7 +132,7 @@ class KalmanFilter:
         else:
             raise ValueError('Invalid measurement type')
 
-        return self._project(mean, covariance, std_factor, min_std, self.meas_mat, multiplier)
+        return self._project(mean, covariance, self.meas_mat, std_factor, min_std, multiplier)
 
     def update(self, mean, covariance, measurement, meas_type, multiplier=1.):
         """
@@ -165,8 +156,8 @@ class KalmanFilter:
         """
         projected_mean, projected_cov = self.project(mean, covariance, meas_type, multiplier)
 
-        return self._update(mean, covariance, projected_mean, 
-            projected_cov, measurement, self.meas_mat)
+        return self._update(mean, covariance, projected_mean,
+                            projected_cov, measurement, self.meas_mat)
 
     def motion_distance(self, mean, covariance, measurements):
         """
@@ -210,9 +201,9 @@ class KalmanFilter:
         H1 = np.ascontiguousarray(H[:2, :2])
         h2 = np.ascontiguousarray(H[:2, 2])
         h3 = np.ascontiguousarray(H[2, :2])
-        h4 = 1
-        
-        E1 = np.eye(8, 2) 
+        h4 = 1.
+
+        E1 = np.eye(8, 2)
         E3 = np.eye(8, 2, -4)
         M = E1 @ H1 @ E1.T + E3 @ H1 @ E3.T
         M31 = E3 @ H1 @ E1.T
@@ -255,25 +246,27 @@ class KalmanFilter:
 
     @staticmethod
     @nb.njit(fastmath=True, cache=True)
-    def _predict(mean, covariance, small_std_acc, std_acc_rate, acc_cov, transition_mat):
+    def _predict(mean, covariance, motion_mat, acc_cov, std_factor_acc, std_offset_acc):
         size = max(mean[2:4] - mean[:2] + 1) # max(w, h)
-        std_acc = small_std_acc[1] + (size - small_std_acc[0]) * std_acc_rate
-        motion_cov = acc_cov * std_acc**2
+        std = std_factor_acc * size + std_offset_acc
+        motion_cov = acc_cov * std**2
 
-        mean = transition_mat @ mean
-        covariance = transition_mat @ covariance @ transition_mat.T + motion_cov
+        mean = motion_mat @ mean
+        covariance = motion_mat @ covariance @ motion_mat.T + motion_cov
+        # ensure positive definiteness
+        covariance = 0.5 * (covariance + covariance.T)
         return mean, covariance
 
     @staticmethod
     @nb.njit(fastmath=True, cache=True)
-    def _project(mean, covariance, std_factor, min_std, meas_mat, multiplier):
+    def _project(mean, covariance, meas_mat, std_factor, min_std, multiplier):
         w, h = mean[2:4] - mean[:2] + 1
         std = np.array([
-            max(w * std_factor[0], min_std[0]),
-            max(h * std_factor[1], min_std[1]),
-            max(w * std_factor[0], min_std[0]),
-            max(h * std_factor[1], min_std[1])
-        ])
+            max(std_factor[0] * w, min_std[0]),
+            max(std_factor[1] * h, min_std[1]),
+            max(std_factor[0] * w, min_std[0]),
+            max(std_factor[1] * h, min_std[1])
+        ], dtype=np.float64)
         meas_cov = np.diag(np.square(std * multiplier))
 
         mean = meas_mat @ mean
@@ -286,9 +279,9 @@ class KalmanFilter:
     def _update(mean, covariance, proj_mean, proj_cov, measurement, meas_mat):
         kalman_gain = np.linalg.solve(proj_cov, (covariance @ meas_mat.T).T).T
         innovation = measurement - proj_mean
-        new_mean = mean + innovation @ kalman_gain.T
-        new_covariance = covariance - kalman_gain @ proj_cov @ kalman_gain.T
-        return new_mean, new_covariance
+        mean = mean + innovation @ kalman_gain.T
+        covariance = covariance - kalman_gain @ proj_cov @ kalman_gain.T
+        return mean, covariance
 
     @staticmethod
     @nb.njit(fastmath=True, cache=True)
